@@ -1,22 +1,13 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler, PowerTransformer
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.linear_model import SGDRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import mlflow
 from mlflow.models import infer_signature
 import joblib
-
-def scale_frame(frame):
-    df = frame.copy()
-    X = df.drop(columns=['charges'])
-    y = df['charges']
-    scaler = StandardScaler()
-    power_trans = PowerTransformer()
-    X_scaled = scaler.fit_transform(X)
-    y_scaled = power_trans.fit_transform(y.values.reshape(-1, 1))
-    return X_scaled, y_scaled, power_trans
 
 def eval_metrics(actual, pred):
     rmse = np.sqrt(mean_squared_error(actual, pred))
@@ -25,11 +16,19 @@ def eval_metrics(actual, pred):
     return rmse, mae, r2
 
 if __name__ == "__main__":
+    # Загружаем очищенные данные
     df = pd.read_csv("./df_clear.csv")
-    X, Y, power_trans = scale_frame(df)
-    X_train, X_val, y_train, y_val = train_test_split(X, Y,
-                                                      test_size=0.3,
-                                                      random_state=42)
+    X = df.drop(columns=['charges'])
+    y = df['charges']                    # исходные значения, без преобразований
+
+    # Масштабируем только признаки
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # Делим выборку
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_scaled, y, test_size=0.3, random_state=42
+    )
     
     params = {
         'alpha': [0.0001, 0.001, 0.01, 0.05, 0.1],
@@ -39,34 +38,44 @@ if __name__ == "__main__":
         'fit_intercept': [False, True]
     }
     
+    # Создаём эксперимент в MLflow
     mlflow.set_experiment("insurance_charges_model")
-    with mlflow.start_run():
+    
+    with mlflow.start_run() as run:
+        # Базовый регрессор
         lr = SGDRegressor(random_state=42)
         clf = GridSearchCV(lr, params, cv=3, n_jobs=4)
-        clf.fit(X_train, y_train.ravel())
-        best = clf.best_estimator_
-        y_pred = best.predict(X_val)
-        y_price_pred = power_trans.inverse_transform(y_pred.reshape(-1, 1))
-        y_val_orig = power_trans.inverse_transform(y_val)
-        rmse, mae, r2 = eval_metrics(y_val_orig, y_price_pred)
         
-        mlflow.log_param("alpha", best.alpha)
-        mlflow.log_param("l1_ratio", best.l1_ratio)
-        mlflow.log_param("penalty", best.penalty)
-        mlflow.log_param("loss", best.loss)
-        mlflow.log_param("fit_intercept", best.fit_intercept)
+        # Обёртка с автоматическим преобразованием y
+        model = TransformedTargetRegressor(
+            regressor=clf,
+            transformer=PowerTransformer()
+        )
+        
+        # Обучаем на исходных y_train
+        model.fit(X_train, y_train)
+        
+        # Предсказания уже в исходной шкале
+        y_pred = model.predict(X_val)
+        
+        # Вычисляем метрики на исходных данных
+        rmse, mae, r2 = eval_metrics(y_val, y_pred)
+        
+        # Логируем параметры лучшего найдённого регрессора
+        best_params = model.regressor_.best_params_
+        mlflow.log_params(best_params)
         mlflow.log_metric("rmse", rmse)
         mlflow.log_metric("mae", mae)
         mlflow.log_metric("r2", r2)
         
-        predictions = best.predict(X_train)
-        signature = infer_signature(X_train, predictions)
-        mlflow.sklearn.log_model(best, "model", signature=signature)
+        # Сохраняем модель (вся обёртка) с сигнатурой
+        signature = infer_signature(X_train, model.predict(X_train))
+        mlflow.sklearn.log_model(model, "model", signature=signature)
         
-        with open("insurance_model.pkl", "wb") as f:
-            joblib.dump(best, f)
-    
-    df_runs = mlflow.search_runs()
-    best_run = df_runs.sort_values("metrics.r2", ascending=False).iloc[0]
-    artifact_uri = best_run['artifact_uri'].replace("file://", "") + '/model'
-    print(artifact_uri)
+        # Сохраняем путь к артефакту в файл для деплоя
+        artifact_uri = run.info.artifact_uri.replace("file://", "") + "/model"
+        with open("best_model.txt", "w") as f:
+            f.write(artifact_uri)
+        
+        # Выводим путь в лог Jenkins
+        print(f"Model saved at: {artifact_uri}")
