@@ -69,3 +69,4 @@ if __name__ == "__main__":
     df_runs = mlflow.search_runs()
     best_run = df_runs.sort_values("metrics.r2", ascending=False).iloc[0]
     artifact_uri = best_run['artifact_uri'].replace("file://", "") + '/model'
+    print(artifact_uri)
