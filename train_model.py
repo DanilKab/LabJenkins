@@ -57,6 +57,7 @@ if __name__ == "__main__":
         
         # Предсказания уже в исходной шкале
         y_pred = model.predict(X_val)
+        print("Example predictions (first 5):", y_pred[:5])
         
         # Вычисляем метрики на исходных данных
         rmse, mae, r2 = eval_metrics(y_val, y_pred)
